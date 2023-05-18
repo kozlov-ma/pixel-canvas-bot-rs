@@ -5,7 +5,7 @@ use std::rc::Rc;
 use futures;
 use std::time::Duration;
 use clap::Parser;
-use image::DynamicImage;
+use image::{DynamicImage, Rgb};
 use image::GenericImage;
 use image::GenericImageView;
 use image::ImageBuffer;
@@ -20,6 +20,7 @@ use indicatif::ParallelProgressIterator;
 use indicatif::ProgressStyle;
 use rayon::iter::ParallelIterator;
 use rayon::iter::IntoParallelRefIterator;
+use reqwest::ClientBuilder;
 use reqwest::header::HeaderMap;
 use pixel_data::PixelData;
 use tokio::task;
@@ -80,15 +81,21 @@ fn get_requests(x_pos: i32, y_pos: i32, grayscale: bool, inverse: bool, fingerpr
         true => img.invert(),
         false => ()
     };
+
     let pixels = match grayscale {
-        true => img.grayscale().into_rgb8(),
-        false => img.into_rgb8()
+        true => img.grayscale().to_rgba8(),
+        false => img.to_rgba8()
     };
 
-    let pixels = pixels.enumerate_pixels()
+    let pixels = pixels
+        .enumerate_pixels()
+        .filter(|(_x, _y, p)| p.channels()[3] > 0)
+        .map(|(x, y, p)| (x, y, p.to_rgb()));
+
+    let pixels = pixels
         .map(
             |(x, y, p)|
-                PixelData::from_rgb8(x as i32 + x_pos, y as i32 + y_pos, p, grayscale));
+                PixelData::from_rgb8(x as i32 + x_pos, y as i32 + y_pos, &p, grayscale));
 
     let mut requests: Vec<String> = pixels
         .map(|p| p.get_json(fingerprint))
@@ -100,12 +107,13 @@ fn get_requests(x_pos: i32, y_pos: i32, grayscale: bool, inverse: bool, fingerpr
 
 
 async fn send_request(url: &str, request: String, headers: Arc<HeaderMap>, client: Arc<reqwest::Client>) {
-        let headers= headers.as_ref();
-        if let Err(r) = client.post(url)
-            .body(request.clone())
-            .headers(headers.to_owned())
-            .send()
-            .await { println!("Error, request: {}", r) };
+    let headers= headers.as_ref();
+    if let Err(r) = client.post(url)
+        .body(request.clone())
+        .headers(headers.to_owned())
+        // .timeout(Duration::from_millis(2000))
+        .send()
+        .await { println!("Error, request: {}", r) };
 }
 
 #[tokio::main]
@@ -133,12 +141,14 @@ async fn main() {
     }
 
     let url = "https://pixel.alexbers.com/api/pixel";
-    println!("Starting to print in three seconds...");
-    thread::sleep(Duration::from_secs(3));
-    println!("Sending reqwests...");
+
 
     let requests
         = get_requests(args.x_pos, args.y_pos, args.grayscale, args.invert, &args.fingerprint, &args.image_path);
+
+    println!("Starting to print in three seconds...");
+    thread::sleep(Duration::from_secs(3));
+    println!("Sending reqwests...");
 
     let req_len = requests.len();
     let chunk_length = &req_len / args.threads as usize;
