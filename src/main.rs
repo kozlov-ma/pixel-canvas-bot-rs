@@ -1,30 +1,15 @@
 #![feature(async_closure)]
 use std::{thread};
-use std::future::IntoFuture;
-use std::rc::Rc;
-use futures;
 use std::time::Duration;
 use clap::Parser;
-use image::{DynamicImage, Rgb};
-use image::GenericImage;
-use image::GenericImageView;
-use image::ImageBuffer;
 use image::Pixel;
-use image::RgbImage;
 pub use rayon::prelude::*;
-use strum::{IntoEnumIterator};
 use std::sync::Arc;
-use futures::TryFutureExt;
-use indicatif::{MultiProgress, ProgressBar, ProgressIterator};
-use indicatif::ParallelProgressIterator;
-use indicatif::ProgressStyle;
-use rayon::iter::ParallelIterator;
-use rayon::iter::IntoParallelRefIterator;
-use reqwest::ClientBuilder;
+use rayon::iter::{ParallelIterator};
 use reqwest::header::HeaderMap;
 use pixel_data::PixelData;
 use tokio::task;
-use tokio::task::{JoinSet};
+
 
 mod pixel_data;
 
@@ -48,9 +33,17 @@ struct Args {
     #[arg(long)]
     invert: bool,
 
-
     #[arg(long)]
     grayscale: bool,
+
+    #[arg(long)]
+    shuffle: bool,
+
+    #[arg(long)]
+    reverse: bool,
+
+    #[arg(long, default_value_t = 65536)]
+    timeout: u64,
 }
 
 fn get_headers() -> HeaderMap {
@@ -74,10 +67,11 @@ fn get_headers() -> HeaderMap {
     headers
 }
 
-fn get_requests(x_pos: i32, y_pos: i32, grayscale: bool, inverse: bool, fingerprint: &str, image_path: &str) -> Vec<String> {
+fn get_requests(x_pos: i32, y_pos: i32, grayscale: bool, invert: bool, shuffle: bool,
+                reverse: bool, fingerprint: &str, image_path: &str) -> Vec<String> {
     use rand::{thread_rng, seq::SliceRandom};
     let mut img = image::open(image_path).expect("No image found by the given path.");
-    match inverse {
+    match invert {
         true => img.invert(),
         false => ()
     };
@@ -101,23 +95,30 @@ fn get_requests(x_pos: i32, y_pos: i32, grayscale: bool, inverse: bool, fingerpr
         .map(|p| p.get_json(fingerprint))
         .collect();
 
-    requests.shuffle(&mut thread_rng());
+    if shuffle {
+        requests.shuffle(&mut thread_rng());
+    }
+
+    if reverse {
+        requests.reverse();
+    }
+
     requests
 }
 
 
-async fn send_request(url: &str, request: String, headers: Arc<HeaderMap>, client: Arc<reqwest::Client>) {
+async fn send_request(url: &str, request: String, headers: Arc<HeaderMap>, client: Arc<reqwest::Client>, timeout_ms: u64) {
     let headers= headers.as_ref();
     if let Err(r) = client.post(url)
         .body(request.clone())
         .headers(headers.to_owned())
-        // .timeout(Duration::from_millis(2000))
+        .timeout(Duration::from_millis(timeout_ms))
         .send()
         .await { println!("Error, request: {}", r) };
 }
 
 #[tokio::main]
-async fn send_requests(url: &str, requests: Vec<String>){
+async fn send_requests(url: &str, requests: Vec<String>, timeout_ms: u64){
     let client = Arc::new(reqwest::Client::new());
     let headers = Arc::new(get_headers());
 
@@ -126,7 +127,8 @@ async fn send_requests(url: &str, requests: Vec<String>){
             url,
             r.to_owned(),
             headers.clone(),
-            client.clone()
+            client.clone(),
+            timeout_ms.clone()
         );
 
         fut.await;
@@ -141,10 +143,16 @@ async fn main() {
     }
 
     let url = "https://pixel.alexbers.com/api/pixel";
-
-
     let requests
-        = get_requests(args.x_pos, args.y_pos, args.grayscale, args.invert, &args.fingerprint, &args.image_path);
+        = get_requests(
+            args.x_pos,
+            args.y_pos,
+            args.grayscale,
+            args.invert,
+            args.shuffle,
+            args.reverse,
+            &args.fingerprint,
+            &args.image_path);
 
     println!("Starting to print in three seconds...");
     thread::sleep(Duration::from_secs(3));
@@ -154,51 +162,16 @@ async fn main() {
     let chunk_length = &req_len / args.threads as usize;
     let chunks: Vec<Vec<String>> = requests.chunks(chunk_length).map(|s| s.into()).collect();
 
-    let style
-        = ProgressStyle::with_template("[{elapsed_precise}]\
-         [{per_sec}]\
-          [{eta_precise}]\
-          {bar:40.cyan/blue}\
-           {pos:>7}/{len:7}\
-            {msg}").expect("Wrong progress style");
-    // let progress = Arc::new(ProgressBar::new(req_len as u64).with_style(style));
-
     let mut threads = vec![];
 
+    let timeout = args.timeout;
     for c in chunks {
-        threads.push(tokio::task::spawn_blocking(|| { send_requests(url, c) }));
+        threads.push(task::spawn_blocking(move || { send_requests(url, c, timeout.clone()) }));
     }
 
     for t in threads.into_iter() {
         t.await.expect("thread panicked");
     }
-    //
-    // let headers = Arc::new(get_headers());
-    // let client = Arc::new(reqwest::Client::new());
-    // for r in requests.into_iter() {
-    //     let r = r.to_owned();
-    //     let headers = headers.clone();
-    //     let client = client.clone();
-    //     send_requests(url, r).await;
-    //     threads.push(tokio::spawn(async move { send_request(url, r, headers, client).await }));
-    // }
-    //
-    //
-    // let style
-    //     = ProgressStyle::with_template("[{elapsed_precise}]\
-    //      [{per_sec}]\
-    //       [{eta_precise}]\
-    //       {bar:40.cyan/blue}\
-    //        {pos:>7}/{len:7}\
-    //         {msg}").expect("Wrong progress style");
-    //
-    // // task::yield_now().await;
-    // for t in threads.into_iter().progress_with_style(style) {
-    //     t.await.expect("Couldn't join threads");
-    // }
-    // send_requests(url, requests).await;
-
-    // futures::future::join_all(threads);
 
     println!("Done!");
 }
