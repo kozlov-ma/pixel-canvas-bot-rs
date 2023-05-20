@@ -1034,7 +1034,6 @@ dependencies = [
  "image",
  "indicatif",
  "rand",
- "rayon",
  "reqwest",
  "serde",
  "serde_json",
