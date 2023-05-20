@@ -4,7 +4,8 @@ use std::time::Duration;
 use clap::Parser;
 use image::Pixel;
 pub use rayon::prelude::*;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use indicatif::{ProgressBar, ProgressStyle};
 use rayon::iter::{ParallelIterator};
 use reqwest::header::HeaderMap;
 use pixel_data::PixelData;
@@ -107,7 +108,7 @@ fn get_requests(x_pos: i32, y_pos: i32, grayscale: bool, invert: bool, shuffle: 
 }
 
 
-async fn send_request(url: &str, request: String, headers: Arc<HeaderMap>, client: Arc<reqwest::Client>, timeout_ms: u64) {
+async fn send_request(url: &str, request: String, headers: Arc<HeaderMap>, client: Arc<reqwest::Client>, timeout_ms: u64, progress: &mut Arc<Mutex<ProgressBar>>) {
     let headers= headers.as_ref();
     if let Err(r) = client.post(url)
         .body(request.clone())
@@ -115,10 +116,13 @@ async fn send_request(url: &str, request: String, headers: Arc<HeaderMap>, clien
         .timeout(Duration::from_millis(timeout_ms))
         .send()
         .await { println!("Error, request: {}", r) };
+
+    let mut pixels = progress.lock().unwrap();
+    pixels.inc(1);
 }
 
 #[tokio::main]
-async fn send_requests(url: &str, requests: Vec<String>, timeout_ms: u64){
+async fn send_requests(url: &str, requests: Vec<String>, timeout_ms: u64, progress: &mut Arc<Mutex<ProgressBar>>){
     let client = Arc::new(reqwest::Client::new());
     let headers = Arc::new(get_headers());
 
@@ -128,7 +132,8 @@ async fn send_requests(url: &str, requests: Vec<String>, timeout_ms: u64){
             r.to_owned(),
             headers.clone(),
             client.clone(),
-            timeout_ms.clone()
+            timeout_ms.clone(),
+            progress
         );
 
         fut.await;
@@ -162,11 +167,22 @@ async fn main() {
     let chunk_length = &req_len / args.threads as usize;
     let chunks: Vec<Vec<String>> = requests.chunks(chunk_length).map(|s| s.into()).collect();
 
+    let style
+        = ProgressStyle::with_template("[{elapsed_precise}]\
+         [{per_sec}]\
+          [{eta_precise}]\
+          {bar:40.cyan/blue}\
+           {pos:>7}/{len:7}\
+            {msg}").expect("Wrong progress style");
+
+    let progress = Arc::new(Mutex::new(ProgressBar::new(req_len as u64).with_style(style)));
+
     let mut threads = vec![];
 
     let timeout = args.timeout;
     for c in chunks {
-        threads.push(task::spawn_blocking(move || { send_requests(url, c, timeout.clone()) }));
+        let mut p_pix = progress.clone();
+        threads.push(task::spawn_blocking(move || { send_requests(url, c, timeout.clone(), &mut p_pix) }));
     }
 
     for t in threads.into_iter() {

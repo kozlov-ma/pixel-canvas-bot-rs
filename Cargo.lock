@@ -500,6 +500,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "goto"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4a1f4dc1af249b28a85cbb69b39a4fe02dd04498a3addec86d0ef3b6b08132e"
+
+[[package]]
 name = "h2"
 version = "0.3.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1024,6 +1030,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "futures",
+ "goto",
  "image",
  "indicatif",
  "rand",
